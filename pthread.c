@@ -1,109 +1,170 @@
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 #include <pthread.h>
+#include <time.h>
 
-#define ARRAY_SIZE 100
-#define NUM_BUCKETS 10
-#define NUM_THREADS 4
+#define max_threads 80
 
-// Structure for passing parameters to thread function
-typedef struct {
-    int *array;
-    int start;
-    int end;
-    int **buckets;
-} ThreadData;
+struct bucket {
+    int n_elem;
+    int idx; 
+    int start; 
+};
 
-// Function to compare integers for qsort
-int compareIntegers(const void *a, const void *b) {
+struct thread_data {
+    int thread_id;
+    int size;
+    int num_buckets;
+    int limit;
+    int *arrA;
+    int *arrB;
+    struct bucket *buckets;
+};
+
+int cmpfunc(const void *a, const void *b) {
     return (*(int *)a - *(int *)b);
 }
 
-// Function to insert elements into buckets
-void *insertIntoBuckets(void *arg) {
-    ThreadData *data = (ThreadData *)arg;
-    int *array = data->array;
-    int start = data->start;
-    int end = data->end;
-    int **buckets = data->buckets;
+void *bucket_sort(void *arg) {
+    struct thread_data *data = (struct thread_data *)arg;
+    int thread_id = data->thread_id;
+    int size = data->size;
+    int num_buckets = data->num_buckets;
+    int limit = data->limit;
+    int *arrA = data->arrA;
+    int *arrB = data->arrB;
+    struct bucket *buckets = data->buckets;
 
-    for (int i = start; i < end; i++) {
-        int bucket_index = array[i] / (ARRAY_SIZE / NUM_BUCKETS);
-        int index = ++buckets[bucket_index][0];
-        buckets[bucket_index][index] = array[i];
+    int i, j, k, local_idx, real_bucket_idx, workload, prev_idx;
+    int w = limit / num_buckets;
+
+    workload = size / num_buckets;
+    int my_start = thread_id * workload;
+    int my_end = my_start + workload;
+
+    for (i = my_start; i < my_end; i++) {
+        local_idx = arrA[i] / w;
+        if (local_idx > num_buckets - 1)
+            local_idx = num_buckets - 1;
+        real_bucket_idx = local_idx + thread_id * num_buckets;
+        buckets[real_bucket_idx].n_elem++;
+    }
+
+    pthread_barrier_wait(&barrier);
+
+    if (thread_id == 0) {
+        int global_n_elem[num_buckets]; 
+        int global_start_position[num_buckets]; 
+        memset(global_n_elem, 0, sizeof(int) * num_buckets);
+        memset(global_start_position, 0, sizeof(int) * num_buckets);
+
+        for (i = 0; i < num_buckets * max_threads; i++) {
+            int bucket_id = i % num_buckets;
+            global_n_elem[bucket_id] += buckets[i].n_elem;
+        }
+
+        global_start_position[0] = 0;
+        for (i = 1; i < num_buckets; i++) {
+            global_start_position[i] = global_start_position[i - 1] + global_n_elem[i - 1];
+        }
+
+        for (i = 0; i < num_buckets * max_threads; i++) {
+            int bucket_id = i % num_buckets;
+            buckets[i].start = global_start_position[bucket_id] + buckets[i].n_elem;
+            buckets[i].idx = buckets[i].start;
+        }
+    }
+
+    pthread_barrier_wait(&barrier);
+
+    for (i = my_start; i < my_end; i++) {
+        j = arrA[i] / w;
+        if (j > num_buckets - 1)
+            j = num_buckets - 1;
+        k = j + thread_id * num_buckets;
+        int b_index = buckets[k].idx++;
+        arrB[b_index] = arrA[i];
+    }
+
+    pthread_barrier_wait(&barrier);
+
+    for (i = 0; i < num_buckets; i++) {
+        qsort(arrB + buckets[thread_id * num_buckets + i].start, buckets[thread_id * num_buckets + i].n_elem, sizeof(int), cmpfunc);
     }
 
     pthread_exit(NULL);
 }
 
-// Function to sort a single bucket
-void sortBucket(int *bucket, int size) {
-    qsort(bucket + 1, size, sizeof(int), compareIntegers);
-}
+int main(int argc, char *argv[]) {
+    int size, num_buckets, i;
+    double start_time, total_time;
+    pthread_t threads[max_threads];
+    struct thread_data td[max_threads];
+    struct bucket *buckets;
 
-// Function to merge buckets into a single array
-void mergeBuckets(int *array, int **buckets) {
-    int index = 0;
-    for (int i = 0; i < NUM_BUCKETS; i++) {
-        for (int j = 1; j <= buckets[i][0]; j++) {
-            array[index++] = buckets[i][j];
+    printf("Give length of array to sort\n");
+    if (scanf("%d", &size) != 1) {
+        printf("Error\n");
+        return -1;
+    }
+    printf("Give number of buckets\n");
+    if (scanf("%d", &num_buckets) != 1) {
+        printf("Error\n");
+        return -1;
+    }
+
+    int limit = 100000;
+    int *arrA = (int *)malloc(sizeof(int) * size);
+    int *arrB = (int *)malloc(sizeof(int) * size);
+
+    for (i = 0; i < size; i++) {
+        arrA[i] = random() % limit;
+    }
+
+    if (size <= 40) {
+        printf("Unsorted data\n");
+        for (i = 0; i < size; i++) {
+            printf("%d ", arrA[i]);
         }
-    }
-}
-
-int main() {
-    int array[ARRAY_SIZE];
-    int *buckets[NUM_BUCKETS];
-    pthread_t threads[NUM_THREADS];
-    ThreadData threadData[NUM_THREADS];
-
-    // Initialize array with random numbers
-    srand(42);
-    for (int i = 0; i < ARRAY_SIZE; i++) {
-        array[i] = rand() % 100;
+        printf("\n");
     }
 
-    // Initialize buckets
-    for (int i = 0; i < NUM_BUCKETS; i++) {
-        buckets[i] = (int *)malloc((ARRAY_SIZE / NUM_BUCKETS + 1) * sizeof(int));
-        buckets[i][0] = 0; // First element of each bucket stores the count of elements
+    buckets = (struct bucket *)calloc(num_buckets * max_threads, sizeof(struct bucket));
+
+    pthread_barrier_init(&barrier, NULL, max_threads);
+
+    start_time = omp_get_wtime();
+
+    for (i = 0; i < max_threads; i++) {
+        td[i].thread_id = i;
+        td[i].size = size;
+        td[i].num_buckets = num_buckets;
+        td[i].limit = limit;
+        td[i].arrA = arrA;
+        td[i].arrB = arrB;
+        td[i].buckets = buckets;
+        pthread_create(&threads[i], NULL, bucket_sort, (void *)&td[i]);
     }
 
-    // Scatter phase: Insert elements into buckets
-    for (int i = 0; i < NUM_THREADS; i++) {
-        threadData[i].array = array;
-        threadData[i].start = i * (ARRAY_SIZE / NUM_THREADS);
-        threadData[i].end = (i + 1) * (ARRAY_SIZE / NUM_THREADS);
-        threadData[i].buckets = buckets;
-        pthread_create(&threads[i], NULL, insertIntoBuckets, &threadData[i]);
-    }
-
-    // Join threads
-    for (int i = 0; i < NUM_THREADS; i++) {
+    for (i = 0; i < max_threads; i++) {
         pthread_join(threads[i], NULL);
     }
 
-    // Sort each bucket using multiple threads
-    for (int i = 0; i < NUM_BUCKETS; i++) {
-        pthread_t sortThread;
-        pthread_create(&sortThread, NULL, sortBucket, buckets[i]);
-        pthread_join(sortThread, NULL);
-    }
+    total_time = omp_get_wtime() - start_time;
 
-    // Merge sorted buckets back into the array
-    mergeBuckets(array, buckets);
-
-    // Print sorted array
-    printf("Sorted Array: ");
-    for (int i = 0; i < ARRAY_SIZE; i++) {
-        printf("%d ", array[i]);
+    printf("Sorted Array:\n");
+    for (i = 0; i < size; i++) {
+        printf("%d ", arrB[i]);
     }
     printf("\n");
 
-    // Free memory
-    for (int i = 0; i < NUM_BUCKETS; i++) {
-        free(buckets[i]);
-    }
+    printf("Sorting %d elements took %f seconds\n", size, total_time);
+
+    free(arrA);
+    free(arrB);
+    free(buckets);
+    pthread_barrier_destroy(&barrier);
 
     return 0;
 }
